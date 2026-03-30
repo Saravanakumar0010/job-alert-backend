@@ -14,13 +14,14 @@ import hashlib
 import time
 import random
 import re
+import os
 from bs4 import BeautifulSoup
 from twilio.rest import Client
 
 app = FastAPI(title="Job Alert API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-DB_FILE = "jobapp.db"
+DB_FILE = os.environ.get("DB_PATH", "jobapp.db")
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,9 @@ def scheduled_job():
 scheduler = BackgroundScheduler()
 scheduler.add_job(scheduled_job, 'interval', minutes=1)
 scheduler.start()
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
@@ -172,13 +176,22 @@ def scrape_naukri(designation, location):
         slug_d = designation.lower().replace(" ", "-")
         slug_l = location.lower().replace(" ", "-")
         url = f"https://www.naukri.com/{slug_d}-jobs-in-{slug_l}?jobAge=1"
-        r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=15)
+        headers = {
+            **HEADERS,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": "https://www.naukri.com/",
+        }
+        r = requests.get(url, headers=headers, timeout=20)
         if r.status_code != 200:
             return jobs
         soup = BeautifulSoup(r.text, "html.parser")
         cards = soup.find_all("article", class_=re.compile("jobTuple|job-tuple|cust-job"))
         if not cards:
             cards = soup.find_all("div", class_=re.compile("jobTuple|srp-jobtuple"))
+        if not cards:
+            cards = soup.find_all("div", class_=re.compile("job-container|jobContainer"))
         for card in cards:
             try:
                 te = card.find("a", class_=re.compile("title|jobTitle")) or card.find("a", attrs={"title": True})
@@ -252,12 +265,10 @@ def filter_jobs(jobs, designation, sal_min, sal_max, exp_min, exp_max):
 # ── WhatsApp ───────────────────────────────────────────────────────────────────
 
 def send_whatsapp(job, settings):
-    # settings tuple: (user_id, designation, location, sal_min, sal_max,
-    #                  exp_min, exp_max, notify_time, whatsapp, twilio_sid, twilio_token, twilio_from)
     whatsapp = settings[8]
-    sid      = settings[9]
-    token    = settings[10]
-    from_    = settings[11]
+    sid      = settings[9] or os.environ.get("TWILIO_SID", "")
+    token    = settings[10] or os.environ.get("TWILIO_TOKEN", "")
+    from_    = settings[11] or os.environ.get("TWILIO_FROM", "whatsapp:+14155238886")
     if not all([sid, token, whatsapp]):
         return
     client = Client(sid, token)
@@ -280,7 +291,6 @@ def run_scrape(user_id):
         if not s:
             scrape_status[user_id]["result"] = "No settings found"
             return
-        # Unpack safely by index
         designation = s[1]
         location    = s[2]
         sal_min     = s[3]
