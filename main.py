@@ -7,8 +7,6 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
-import sqlite3
 import requests
 import hashlib
 import time
@@ -21,38 +19,75 @@ from twilio.rest import Client
 app = FastAPI(title="Job Alert API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-DB_FILE = os.environ.get("DB_PATH", "jobapp.db")
+# ── Database connection ────────────────────────────────────────────────────────
 
-# ── Database ───────────────────────────────────────────────────────────────────
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+def get_conn():
+    if DATABASE_URL:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn, True
+    else:
+        import sqlite3
+        conn = sqlite3.connect("jobapp.db")
+        return conn, False
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT, email TEXT UNIQUE, password TEXT, created_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
-        user_id INTEGER PRIMARY KEY,
-        designation TEXT DEFAULT 'Python Developer',
-        location TEXT DEFAULT 'India',
-        salary_min INTEGER DEFAULT 0,
-        salary_max INTEGER DEFAULT 50,
-        experience_min INTEGER DEFAULT 0,
-        experience_max INTEGER DEFAULT 5,
-        notify_time TEXT DEFAULT '22:30',
-        whatsapp_number TEXT DEFAULT '',
-        twilio_sid TEXT DEFAULT '',
-        twilio_token TEXT DEFAULT '',
-        twilio_from TEXT DEFAULT 'whatsapp:+14155238886',
-        FOREIGN KEY (user_id) REFERENCES users(id))""")
-    c.execute("""CREATE TABLE IF NOT EXISTS jobs (
-        id TEXT PRIMARY KEY,
-        user_id INTEGER,
-        title TEXT, company TEXT, location TEXT,
-        salary TEXT, experience TEXT,
-        url TEXT, source TEXT, posted TEXT,
-        found_at TEXT, sent INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users(id))""")
+    if is_pg:
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            name TEXT, email TEXT UNIQUE, password TEXT, created_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            designation TEXT DEFAULT 'Python Developer',
+            location TEXT DEFAULT 'India',
+            salary_min INTEGER DEFAULT 0,
+            salary_max INTEGER DEFAULT 50,
+            experience_min INTEGER DEFAULT 0,
+            experience_max INTEGER DEFAULT 5,
+            notify_time TEXT DEFAULT '22:30',
+            whatsapp_number TEXT DEFAULT '',
+            twilio_sid TEXT DEFAULT '',
+            twilio_token TEXT DEFAULT '',
+            twilio_from TEXT DEFAULT 'whatsapp:+14155238886',
+            FOREIGN KEY (user_id) REFERENCES users(id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            title TEXT, company TEXT, location TEXT,
+            salary TEXT, experience TEXT,
+            url TEXT, source TEXT, posted TEXT,
+            found_at TEXT, sent INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id))""")
+    else:
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT, email TEXT UNIQUE, password TEXT, created_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            designation TEXT DEFAULT 'Python Developer',
+            location TEXT DEFAULT 'India',
+            salary_min INTEGER DEFAULT 0,
+            salary_max INTEGER DEFAULT 50,
+            experience_min INTEGER DEFAULT 0,
+            experience_max INTEGER DEFAULT 5,
+            notify_time TEXT DEFAULT '22:30',
+            whatsapp_number TEXT DEFAULT '',
+            twilio_sid TEXT DEFAULT '',
+            twilio_token TEXT DEFAULT '',
+            twilio_from TEXT DEFAULT 'whatsapp:+14155238886',
+            FOREIGN KEY (user_id) REFERENCES users(id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            title TEXT, company TEXT, location TEXT,
+            salary TEXT, experience TEXT,
+            url TEXT, source TEXT, posted TEXT,
+            found_at TEXT, sent INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id))""")
     conn.commit()
     conn.close()
 
@@ -62,7 +97,7 @@ init_db()
 from apscheduler.schedulers.background import BackgroundScheduler
 
 def scheduled_job():
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
     c.execute("SELECT user_id, notify_time FROM user_settings")
     users = c.fetchall()
@@ -82,39 +117,58 @@ def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
 def get_user(email):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE email=?", (email,))
+    if is_pg:
+        c.execute("SELECT * FROM users WHERE email=%s", (email,))
+    else:
+        c.execute("SELECT * FROM users WHERE email=?", (email,))
     row = c.fetchone()
     conn.close()
     return row
 
 def get_settings(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,))
+    if is_pg:
+        c.execute("SELECT * FROM user_settings WHERE user_id=%s", (user_id,))
+    else:
+        c.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
     return row
 
 def get_seen_ids(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("SELECT id FROM jobs WHERE user_id=?", (user_id,))
+    if is_pg:
+        c.execute("SELECT id FROM jobs WHERE user_id=%s", (user_id,))
+    else:
+        c.execute("SELECT id FROM jobs WHERE user_id=?", (user_id,))
     rows = c.fetchall()
     conn.close()
     return {r[0] for r in rows}
 
 def save_job(user_id, job, sent=False):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("""INSERT OR IGNORE INTO jobs
-        (id,user_id,title,company,location,salary,experience,url,source,posted,found_at,sent)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (job["id"], user_id, job["title"], job["company"], job["location"],
-         job.get("salary", "Not mentioned"), job.get("experience", "Not mentioned"),
-         job["url"], job["source"], job["posted"],
-         datetime.now().isoformat(), 1 if sent else 0))
+    if is_pg:
+        c.execute("""INSERT INTO jobs
+            (id,user_id,title,company,location,salary,experience,url,source,posted,found_at,sent)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO NOTHING""",
+            (job["id"], user_id, job["title"], job["company"], job["location"],
+             job.get("salary", "Not mentioned"), job.get("experience", "Not mentioned"),
+             job["url"], job["source"], job["posted"],
+             datetime.now().isoformat(), 1 if sent else 0))
+    else:
+        c.execute("""INSERT OR IGNORE INTO jobs
+            (id,user_id,title,company,location,salary,experience,url,source,posted,found_at,sent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (job["id"], user_id, job["title"], job["company"], job["location"],
+             job.get("salary", "Not mentioned"), job.get("experience", "Not mentioned"),
+             job["url"], job["source"], job["posted"],
+             datetime.now().isoformat(), 1 if sent else 0))
     conn.commit()
     conn.close()
 
@@ -355,12 +409,18 @@ def root():
 def register(data: RegisterModel):
     if get_user(data.email):
         raise HTTPException(400, "Email already registered")
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO users (name,email,password,created_at) VALUES (?,?,?,?)",
-              (data.name, data.email, hash_password(data.password), datetime.now().isoformat()))
-    uid = c.lastrowid
-    c.execute("INSERT INTO user_settings (user_id) VALUES (?)", (uid,))
+    if is_pg:
+        c.execute("INSERT INTO users (name,email,password,created_at) VALUES (%s,%s,%s,%s) RETURNING id",
+                  (data.name, data.email, hash_password(data.password), datetime.now().isoformat()))
+        uid = c.fetchone()[0]
+        c.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (uid,))
+    else:
+        c.execute("INSERT INTO users (name,email,password,created_at) VALUES (?,?,?,?)",
+                  (data.name, data.email, hash_password(data.password), datetime.now().isoformat()))
+        uid = c.lastrowid
+        c.execute("INSERT INTO user_settings (user_id) VALUES (?)", (uid,))
     conn.commit()
     conn.close()
     return {"message": "Registered!", "user_id": uid, "name": data.name}
@@ -387,15 +447,31 @@ def get_user_settings(user_id: int):
 
 @app.post("/settings/{user_id}")
 def update_settings(user_id: int, data: SettingsModel):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("""INSERT OR REPLACE INTO user_settings
-        (user_id,designation,location,salary_min,salary_max,
-         experience_min,experience_max,notify_time,whatsapp_number,
-         twilio_sid,twilio_token,twilio_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (user_id, data.designation, data.location, data.salary_min, data.salary_max,
-         data.experience_min, data.experience_max, data.notify_time, data.whatsapp_number,
-         data.twilio_sid, data.twilio_token, data.twilio_from))
+    if is_pg:
+        c.execute("""INSERT INTO user_settings
+            (user_id,designation,location,salary_min,salary_max,
+             experience_min,experience_max,notify_time,whatsapp_number,
+             twilio_sid,twilio_token,twilio_from) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (user_id) DO UPDATE SET
+            designation=EXCLUDED.designation, location=EXCLUDED.location,
+            salary_min=EXCLUDED.salary_min, salary_max=EXCLUDED.salary_max,
+            experience_min=EXCLUDED.experience_min, experience_max=EXCLUDED.experience_max,
+            notify_time=EXCLUDED.notify_time, whatsapp_number=EXCLUDED.whatsapp_number,
+            twilio_sid=EXCLUDED.twilio_sid, twilio_token=EXCLUDED.twilio_token,
+            twilio_from=EXCLUDED.twilio_from""",
+            (user_id, data.designation, data.location, data.salary_min, data.salary_max,
+             data.experience_min, data.experience_max, data.notify_time, data.whatsapp_number,
+             data.twilio_sid, data.twilio_token, data.twilio_from))
+    else:
+        c.execute("""INSERT OR REPLACE INTO user_settings
+            (user_id,designation,location,salary_min,salary_max,
+             experience_min,experience_max,notify_time,whatsapp_number,
+             twilio_sid,twilio_token,twilio_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (user_id, data.designation, data.location, data.salary_min, data.salary_max,
+             data.experience_min, data.experience_max, data.notify_time, data.whatsapp_number,
+             data.twilio_sid, data.twilio_token, data.twilio_from))
     conn.commit()
     conn.close()
     return {"message": "Settings saved!"}
@@ -413,15 +489,24 @@ def get_status(user_id: int):
 
 @app.get("/jobs/{user_id}")
 def get_jobs(user_id: int, source: str = "all", limit: int = 50):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    if source == "all":
-        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                     FROM jobs WHERE user_id=? ORDER BY found_at DESC LIMIT ?""", (user_id, limit))
+    if is_pg:
+        if source == "all":
+            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                         FROM jobs WHERE user_id=%s ORDER BY found_at DESC LIMIT %s""", (user_id, limit))
+        else:
+            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                         FROM jobs WHERE user_id=%s AND source=%s ORDER BY found_at DESC LIMIT %s""",
+                      (user_id, source, limit))
     else:
-        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                     FROM jobs WHERE user_id=? AND source=? ORDER BY found_at DESC LIMIT ?""",
-                  (user_id, source, limit))
+        if source == "all":
+            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                         FROM jobs WHERE user_id=? ORDER BY found_at DESC LIMIT ?""", (user_id, limit))
+        else:
+            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                         FROM jobs WHERE user_id=? AND source=? ORDER BY found_at DESC LIMIT ?""",
+                      (user_id, source, limit))
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "company": r[2], "location": r[3],
@@ -430,10 +515,14 @@ def get_jobs(user_id: int, source: str = "all", limit: int = 50):
 
 @app.get("/history/{user_id}")
 def get_history(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                 FROM jobs WHERE user_id=? AND sent=1 ORDER BY found_at DESC""", (user_id,))
+    if is_pg:
+        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                     FROM jobs WHERE user_id=%s AND sent=1 ORDER BY found_at DESC""", (user_id,))
+    else:
+        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
+                     FROM jobs WHERE user_id=? AND sent=1 ORDER BY found_at DESC""", (user_id,))
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "company": r[2], "location": r[3],
@@ -442,9 +531,12 @@ def get_history(user_id: int):
 
 @app.delete("/history/{user_id}")
 def clear_history(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn, is_pg = get_conn()
     c = conn.cursor()
-    c.execute("DELETE FROM jobs WHERE user_id=?", (user_id,))
+    if is_pg:
+        c.execute("DELETE FROM jobs WHERE user_id=%s", (user_id,))
+    else:
+        c.execute("DELETE FROM jobs WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
     return {"message": "History cleared!"}
