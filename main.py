@@ -1,6 +1,5 @@
 """
 LinkedIn + Naukri Job Alert App — FastAPI Backend
-Supports: job designation, location, salary, experience, notification time, WhatsApp
 """
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -19,9 +18,9 @@ from twilio.rest import Client
 app = FastAPI(title="Job Alert API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ── Database connection ────────────────────────────────────────────────────────
-
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# ── Database ───────────────────────────────────────────────────────────────────
 
 def get_conn():
     if DATABASE_URL:
@@ -48,7 +47,7 @@ def init_db():
             salary_max INTEGER DEFAULT 50,
             experience_min INTEGER DEFAULT 0,
             experience_max INTEGER DEFAULT 5,
-            notify_time TEXT DEFAULT '22:30',
+            notify_time TEXT DEFAULT '00:00',
             whatsapp_number TEXT DEFAULT '',
             twilio_sid TEXT DEFAULT '',
             twilio_token TEXT DEFAULT '',
@@ -74,7 +73,7 @@ def init_db():
             salary_max INTEGER DEFAULT 50,
             experience_min INTEGER DEFAULT 0,
             experience_max INTEGER DEFAULT 5,
-            notify_time TEXT DEFAULT '22:30',
+            notify_time TEXT DEFAULT '00:00',
             whatsapp_number TEXT DEFAULT '',
             twilio_sid TEXT DEFAULT '',
             twilio_token TEXT DEFAULT '',
@@ -93,24 +92,6 @@ def init_db():
 
 init_db()
 
-# ── Auto Scheduler ─────────────────────────────────────────────────────────────
-from apscheduler.schedulers.background import BackgroundScheduler
-
-def scheduled_job():
-    conn, is_pg = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT user_id, notify_time FROM user_settings")
-    users = c.fetchall()
-    conn.close()
-    now = datetime.now().strftime("%H:%M")
-    for user_id, notify_time in users:
-        if notify_time == now:
-            run_scrape(user_id)
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(scheduled_job, 'interval', minutes=1)
-scheduler.start()
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def hash_password(p):
@@ -119,10 +100,8 @@ def hash_password(p):
 def get_user(email):
     conn, is_pg = get_conn()
     c = conn.cursor()
-    if is_pg:
-        c.execute("SELECT * FROM users WHERE email=%s", (email,))
-    else:
-        c.execute("SELECT * FROM users WHERE email=?", (email,))
+    q = "SELECT * FROM users WHERE email=%s" if is_pg else "SELECT * FROM users WHERE email=?"
+    c.execute(q, (email,))
     row = c.fetchone()
     conn.close()
     return row
@@ -130,10 +109,8 @@ def get_user(email):
 def get_settings(user_id):
     conn, is_pg = get_conn()
     c = conn.cursor()
-    if is_pg:
-        c.execute("SELECT * FROM user_settings WHERE user_id=%s", (user_id,))
-    else:
-        c.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,))
+    q = "SELECT * FROM user_settings WHERE user_id=%s" if is_pg else "SELECT * FROM user_settings WHERE user_id=?"
+    c.execute(q, (user_id,))
     row = c.fetchone()
     conn.close()
     return row
@@ -141,10 +118,8 @@ def get_settings(user_id):
 def get_seen_ids(user_id):
     conn, is_pg = get_conn()
     c = conn.cursor()
-    if is_pg:
-        c.execute("SELECT id FROM jobs WHERE user_id=%s", (user_id,))
-    else:
-        c.execute("SELECT id FROM jobs WHERE user_id=?", (user_id,))
+    q = "SELECT id FROM jobs WHERE user_id=%s" if is_pg else "SELECT id FROM jobs WHERE user_id=?"
+    c.execute(q, (user_id,))
     rows = c.fetchall()
     conn.close()
     return {r[0] for r in rows}
@@ -158,7 +133,7 @@ def save_job(user_id, job, sent=False):
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (id) DO NOTHING""",
             (job["id"], user_id, job["title"], job["company"], job["location"],
-             job.get("salary", "Not mentioned"), job.get("experience", "Not mentioned"),
+             job.get("salary","Not mentioned"), job.get("experience","Not mentioned"),
              job["url"], job["source"], job["posted"],
              datetime.now().isoformat(), 1 if sent else 0))
     else:
@@ -166,7 +141,7 @@ def save_job(user_id, job, sent=False):
             (id,user_id,title,company,location,salary,experience,url,source,posted,found_at,sent)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job["id"], user_id, job["title"], job["company"], job["location"],
-             job.get("salary", "Not mentioned"), job.get("experience", "Not mentioned"),
+             job.get("salary","Not mentioned"), job.get("experience","Not mentioned"),
              job["url"], job["source"], job["posted"],
              datetime.now().isoformat(), 1 if sent else 0))
     conn.commit()
@@ -174,9 +149,19 @@ def save_job(user_id, job, sent=False):
 
 # ── Headers ────────────────────────────────────────────────────────────────────
 
-HEADERS = {
+LINKEDIN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
+}
+
+NAUKRI_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.119 Mobile Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "appid": "109",
+    "systemid": "109",
+    "gid": "LOCATION,INDUSTRY,EDUCATION,FAREA_ROLE",
+    "Referer": "https://www.naukri.com/",
 }
 
 # ── LinkedIn scraper ───────────────────────────────────────────────────────────
@@ -191,7 +176,7 @@ def scrape_linkedin(designation, location):
             f"&f_TPR=r86400&sortBy=DD&start={start}"
         )
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
+            r = requests.get(url, headers=LINKEDIN_HEADERS, timeout=15)
             if r.status_code != 200:
                 continue
             soup = BeautifulSoup(r.text, "html.parser")
@@ -222,54 +207,87 @@ def scrape_linkedin(designation, location):
             continue
     return jobs
 
-# ── Naukri scraper ─────────────────────────────────────────────────────────────
+# ── Naukri API scraper ─────────────────────────────────────────────────────────
 
 def scrape_naukri(designation, location):
     jobs = []
     try:
-        slug_d = designation.lower().replace(" ", "-")
-        slug_l = location.lower().replace(" ", "-")
-        url = f"https://www.naukri.com/{slug_d}-jobs-in-{slug_l}?jobAge=1"
-        headers = {
-            **HEADERS,
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Referer": "https://www.naukri.com/",
-        }
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code != 200:
-            return jobs
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.find_all("article", class_=re.compile("jobTuple|job-tuple|cust-job"))
-        if not cards:
-            cards = soup.find_all("div", class_=re.compile("jobTuple|srp-jobtuple"))
-        if not cards:
-            cards = soup.find_all("div", class_=re.compile("job-container|jobContainer"))
-        for card in cards:
+        # Method 1: Naukri API
+        api_url = (
+            f"https://www.naukri.com/jobapi/v3/search?"
+            f"noOfResults=20&urlType=search_by_key_loc"
+            f"&searchType=adv&keyword={designation.replace(' ','%20')}"
+            f"&location={location.replace(' ','%20')}"
+            f"&jobAge=1&experience=0&sort=1&areaTypeID=0&pageNo=1"
+        )
+        r = requests.get(api_url, headers=NAUKRI_HEADERS, timeout=15)
+        if r.status_code == 200:
             try:
-                te = card.find("a", class_=re.compile("title|jobTitle")) or card.find("a", attrs={"title": True})
-                if not te:
-                    continue
-                title = te.get_text(strip=True)
-                co = card.find(class_=re.compile("companyInfo|company-name|subTitle"))
-                company = co.get_text(strip=True) if co else "See link"
-                le = card.find(class_=re.compile("location|loc"))
-                loc = le.get_text(strip=True) if le else location
-                se = card.find(class_=re.compile("salary|sal"))
-                salary = se.get_text(strip=True) if se else "Not mentioned"
-                ee = card.find(class_=re.compile("experience|exp"))
-                experience = ee.get_text(strip=True) if ee else "Not mentioned"
-                link = te.get("href", "")
-                if not link.startswith("http"):
-                    link = "https://www.naukri.com" + link
-                jid = "nk_" + hashlib.md5(link.encode()).hexdigest()[:10]
-                if title:
-                    jobs.append({"id": jid, "title": title, "company": company,
-                        "location": loc, "salary": salary, "experience": experience,
-                        "url": link, "source": "Naukri", "posted": "recently"})
+                data = r.json()
+                job_list = data.get("jobDetails", [])
+                for job in job_list:
+                    try:
+                        title = job.get("title", "")
+                        company = job.get("companyName", "See link")
+                        loc = ", ".join(job.get("placeholders", [{}])[0].get("label", location).split(",")[:2]) if job.get("placeholders") else location
+                        salary = job.get("placeholders", [{}])[1].get("label", "Not mentioned") if len(job.get("placeholders", [])) > 1 else "Not mentioned"
+                        experience = job.get("placeholders", [{}])[0].get("label", "Not mentioned") if job.get("placeholders") else "Not mentioned"
+                        job_id = str(job.get("jobId", ""))
+                        link = f"https://www.naukri.com/job-listings-{job_id}" if job_id else ""
+                        jid = "nk_" + hashlib.md5(job_id.encode()).hexdigest()[:10]
+                        if title and job_id:
+                            jobs.append({
+                                "id": jid, "title": title, "company": company,
+                                "location": loc, "salary": salary,
+                                "experience": experience, "url": link,
+                                "source": "Naukri", "posted": "recently"
+                            })
+                    except:
+                        continue
             except:
-                continue
+                pass
+
+        # Method 2: Fallback HTML scraping if API fails
+        if not jobs:
+            slug_d = designation.lower().replace(" ", "-")
+            slug_l = location.lower().replace(" ", "-")
+            url = f"https://www.naukri.com/{slug_d}-jobs-in-{slug_l}?jobAge=1"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.naukri.com/",
+            }
+            r2 = requests.get(url, headers=headers, timeout=20)
+            if r2.status_code == 200:
+                soup = BeautifulSoup(r2.text, "html.parser")
+                cards = soup.find_all("article", class_=re.compile("jobTuple|job-tuple"))
+                if not cards:
+                    cards = soup.find_all("div", class_=re.compile("jobTuple|srp-jobtuple|job-container"))
+                for card in cards:
+                    try:
+                        te = card.find("a", class_=re.compile("title|jobTitle")) or card.find("a", attrs={"title": True})
+                        if not te:
+                            continue
+                        title = te.get_text(strip=True)
+                        co = card.find(class_=re.compile("companyInfo|company-name|subTitle"))
+                        company = co.get_text(strip=True) if co else "See link"
+                        le = card.find(class_=re.compile("location|loc"))
+                        loc = le.get_text(strip=True) if le else location
+                        se = card.find(class_=re.compile("salary|sal"))
+                        salary = se.get_text(strip=True) if se else "Not mentioned"
+                        ee = card.find(class_=re.compile("experience|exp"))
+                        experience = ee.get_text(strip=True) if ee else "Not mentioned"
+                        link = te.get("href", "")
+                        if not link.startswith("http"):
+                            link = "https://www.naukri.com" + link
+                        jid = "nk_" + hashlib.md5(link.encode()).hexdigest()[:10]
+                        if title:
+                            jobs.append({"id": jid, "title": title, "company": company,
+                                "location": loc, "salary": salary, "experience": experience,
+                                "url": link, "source": "Naukri", "posted": "recently"})
+                    except:
+                        continue
     except:
         pass
     return jobs
@@ -298,12 +316,11 @@ def parse_exp(s):
     return None
 
 def filter_jobs(jobs, designation, sal_min, sal_max, exp_min, exp_max):
-    keywords = [designation.lower(), "python", "django", "flask", "fastapi",
-                "full stack", "fullstack", "frontend", "react",
-                "junior python", "python fresher"]
+    keywords = designation.lower().split() + [designation.lower()]
     result = []
     for job in jobs:
-        if not any(kw in job["title"].lower() for kw in keywords):
+        title_lower = job["title"].lower()
+        if not any(kw in title_lower for kw in keywords):
             continue
         if job["salary"] != "Not mentioned":
             sal = parse_salary(job["salary"])
@@ -324,7 +341,7 @@ def send_whatsapp(job, settings):
     token    = settings[10] or os.environ.get("TWILIO_TOKEN", "")
     from_    = settings[11] or os.environ.get("TWILIO_FROM", "whatsapp:+14155238886")
     if not all([sid, token, whatsapp]):
-        return
+        raise Exception("Missing Twilio credentials or WhatsApp number")
     client = Client(sid, token)
     icon = "💼" if job["source"] == "LinkedIn" else "🔍"
     msg = (f"{icon} New Job Alert — {job['source']}\n\n"
@@ -340,10 +357,11 @@ scrape_status = {}
 
 def run_scrape(user_id):
     scrape_status[user_id] = {"running": True, "last_run": datetime.now().isoformat(), "result": ""}
+    whatsapp_errors = []
     try:
         s = get_settings(user_id)
         if not s:
-            scrape_status[user_id]["result"] = "No settings found"
+            scrape_status[user_id]["result"] = "No settings found — go to Settings and save!"
             return
         designation = s[1]
         location    = s[2]
@@ -363,13 +381,16 @@ def run_scrape(user_id):
             try:
                 send_whatsapp(job, s)
                 sent += 1
-            except:
-                pass
-            save_job(user_id, job, sent=True)
-            time.sleep(random.uniform(1, 2))
-        scrape_status[user_id]["result"] = (
-            f"LinkedIn: {len(li_jobs)} | Naukri: {len(nk_jobs)} | "
-            f"Matched: {len(matched)} | New: {len(new_jobs)} | Sent: {sent}")
+                time.sleep(random.uniform(1, 2))
+            except Exception as e:
+                whatsapp_errors.append(str(e))
+            save_job(user_id, job, sent=(sent > 0))
+
+        result = (f"LinkedIn: {len(li_jobs)} | Naukri: {len(nk_jobs)} | "
+                  f"Matched: {len(matched)} | New: {len(new_jobs)} | Sent: {sent}")
+        if whatsapp_errors:
+            result += f" | ⚠️ WhatsApp error: {whatsapp_errors[0][:80]}"
+        scrape_status[user_id]["result"] = result
     except Exception as e:
         scrape_status[user_id]["result"] = f"Error: {str(e)}"
     finally:
@@ -493,41 +514,33 @@ def get_jobs(user_id: int, source: str = "all", limit: int = 50):
     c = conn.cursor()
     if is_pg:
         if source == "all":
-            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                         FROM jobs WHERE user_id=%s ORDER BY found_at DESC LIMIT %s""", (user_id, limit))
+            c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=%s ORDER BY found_at DESC LIMIT %s", (user_id, limit))
         else:
-            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                         FROM jobs WHERE user_id=%s AND source=%s ORDER BY found_at DESC LIMIT %s""",
-                      (user_id, source, limit))
+            c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=%s AND source=%s ORDER BY found_at DESC LIMIT %s", (user_id, source, limit))
     else:
         if source == "all":
-            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                         FROM jobs WHERE user_id=? ORDER BY found_at DESC LIMIT ?""", (user_id, limit))
+            c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=? ORDER BY found_at DESC LIMIT ?", (user_id, limit))
         else:
-            c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                         FROM jobs WHERE user_id=? AND source=? ORDER BY found_at DESC LIMIT ?""",
-                      (user_id, source, limit))
+            c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=? AND source=? ORDER BY found_at DESC LIMIT ?", (user_id, source, limit))
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "title": r[1], "company": r[2], "location": r[3],
-             "salary": r[4], "experience": r[5], "url": r[6],
-             "source": r[7], "posted": r[8], "found_at": r[9]} for r in rows]
+    return [{"id": r[0],"title": r[1],"company": r[2],"location": r[3],
+             "salary": r[4],"experience": r[5],"url": r[6],
+             "source": r[7],"posted": r[8],"found_at": r[9]} for r in rows]
 
 @app.get("/history/{user_id}")
 def get_history(user_id: int):
     conn, is_pg = get_conn()
     c = conn.cursor()
     if is_pg:
-        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                     FROM jobs WHERE user_id=%s AND sent=1 ORDER BY found_at DESC""", (user_id,))
+        c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=%s AND sent=1 ORDER BY found_at DESC", (user_id,))
     else:
-        c.execute("""SELECT id,title,company,location,salary,experience,url,source,posted,found_at
-                     FROM jobs WHERE user_id=? AND sent=1 ORDER BY found_at DESC""", (user_id,))
+        c.execute("SELECT id,title,company,location,salary,experience,url,source,posted,found_at FROM jobs WHERE user_id=? AND sent=1 ORDER BY found_at DESC", (user_id,))
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "title": r[1], "company": r[2], "location": r[3],
-             "salary": r[4], "experience": r[5], "url": r[6],
-             "source": r[7], "posted": r[8], "found_at": r[9]} for r in rows]
+    return [{"id": r[0],"title": r[1],"company": r[2],"location": r[3],
+             "salary": r[4],"experience": r[5],"url": r[6],
+             "source": r[7],"posted": r[8],"found_at": r[9]} for r in rows]
 
 @app.delete("/history/{user_id}")
 def clear_history(user_id: int):
